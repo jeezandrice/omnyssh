@@ -1,0 +1,65 @@
+name: Cisco KEX PR build
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-and-build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/omnyssh-gui/ui/package-lock.json
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run core tests
+        run: cargo test -p omnyssh-core
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Install frontend dependencies
+        working-directory: crates/omnyssh-gui/ui
+        run: npm ci
+
+      - name: Build NSIS installer
+        working-directory: crates/omnyssh-gui
+        run: tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $setup = @(Get-ChildItem "target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe")
+          if ($setup.Count -ne 1) {
+            throw "expected one installer, found $($setup.Count): $($setup.Name -join ', ')"
+          }
+          Copy-Item $setup[0].FullName "OmnySSH-Cisco-KEX-test-x86_64-setup.exe"
+          Get-Item "OmnySSH-Cisco-KEX-test-x86_64-setup.exe"
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: OmnySSH-Cisco-KEX-test-Windows
+          path: OmnySSH-Cisco-KEX-test-x86_64-setup.exe
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
