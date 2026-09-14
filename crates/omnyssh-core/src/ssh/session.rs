@@ -308,7 +308,32 @@ pub(crate) async fn connect_budget(host: &Host) -> Duration {
 
 /// The shared russh client configuration (timeouts + keepalives).
 fn client_config() -> Arc<client::Config> {
+    // russh 0.46 implements the NIST ECDH algorithms but intentionally omits
+    // them from its default preference list. A number of still-supported
+    // network appliances (including Cisco IOS 15.x) advertise NIST ECDH plus
+    // SHA-1 finite-field KEX, but not curve25519 or group14-sha256. Advertise
+    // the ECDH algorithms explicitly so those peers can negotiate a modern KEX
+    // without enabling any SHA-1 exchange method on the client.
+    let mut preferred = russh::Preferred::default();
+    let mut kex = preferred.kex.to_vec();
+    for (offset, algorithm) in [
+        russh::kex::ECDH_SHA2_NISTP256,
+        russh::kex::ECDH_SHA2_NISTP384,
+        russh::kex::ECDH_SHA2_NISTP521,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !kex.contains(&algorithm) {
+            // Keep curve25519 first, then the interoperable ECDH choices,
+            // followed by russh's existing finite-field and extension entries.
+            kex.insert(2 + offset, algorithm);
+        }
+    }
+    preferred.kex = std::borrow::Cow::Owned(kex);
+
     Arc::new(client::Config {
+        preferred,
         // No inactivity timeout: russh skips resetting it on the iteration that
         // sends a keepalive, so a peer that never answers `keepalive@openssh.com`
         // (common in appliance SSH stacks) was torn down after 30 s even while
@@ -609,4 +634,25 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_config;
+
+    #[test]
+    fn client_config_advertises_nist_ecdh_kex() {
+        let config = client_config();
+        for algorithm in [
+            russh::kex::ECDH_SHA2_NISTP256,
+            russh::kex::ECDH_SHA2_NISTP384,
+            russh::kex::ECDH_SHA2_NISTP521,
+        ] {
+            assert!(
+                config.preferred.kex.contains(&algorithm),
+                "missing KEX algorithm {}",
+                algorithm.as_ref()
+            );
+        }
+    }
 }
